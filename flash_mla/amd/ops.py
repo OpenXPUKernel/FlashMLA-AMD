@@ -9,9 +9,19 @@ length-dependent worklist: topk lengths are read from device memory on every
 launch, including graph replay.
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
+
+
+def decode_head_tile():
+    """Opt-in head reuse; preserve the original default and prefill geometry."""
+    value = int(os.environ.get("FLASH_MLA_AMD_DECODE_HEAD_TILE", "16"))
+    if value not in (16, 32):
+        raise ValueError("FLASH_MLA_AMD_DECODE_HEAD_TILE must be 16 or 32")
+    return value
 
 
 @triton.jit
@@ -298,7 +308,8 @@ def _forward(
     out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
     maxima = torch.empty(q.shape[:-1], device=q.device, dtype=torch.float32)
     lse = torch.empty_like(maxima)
-    _sparse_mla[(q.shape[0] * q.shape[1], triton.cdiv(q.shape[2], 16))](
+    block_h = 16 if prefill else decode_head_tile()
+    _sparse_mla[(q.shape[0] * q.shape[1], triton.cdiv(q.shape[2], block_h))](
         q,
         cache,
         indices,
@@ -333,7 +344,7 @@ def _forward(
         sink is not None,
         sink.stride(0) if sink is not None else 1,
         scale,
-        16,
+        block_h,
         32,
         num_warps=4,
     )
