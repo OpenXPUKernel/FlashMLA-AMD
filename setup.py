@@ -323,7 +323,7 @@ def build_on_ascend_platform():
 
 def get_build_target_platform() -> str:
     """
-    The target platform of the build, "CUDA" or "ASCEND".
+    The target platform of the build, "CUDA", "ROCM" or "ASCEND".
 
     `FLASH_MLA_BUILD_TARGET_PLATFORM` takes precedence. Otherwise the platform is detected
     without any dependency probing: the Ascend driver exposes `/dev/davinci_manager`,
@@ -331,14 +331,17 @@ def get_build_target_platform() -> str:
     """
     overrided_platform = os.environ.get("FLASH_MLA_BUILD_TARGET_PLATFORM")
     if overrided_platform is not None:
-        available = ["CUDA", "ASCEND"]
+        available = ["CUDA", "ROCM", "ASCEND"]
         if overrided_platform not in available:
             raise ValueError(
                 f"Invalid `FLASH_MLA_BUILD_TARGET_PLATFORM`: {overrided_platform}. "
                 f"Available values are {available}"
             )
         return overrided_platform
-    return "ASCEND" if os.path.exists("/dev/davinci_manager") else "CUDA"
+    if os.path.exists("/dev/davinci_manager"):
+        return "ASCEND"
+    import torch
+    return "ROCM" if torch.version.hip else "CUDA"
 
 
 def get_version() -> str:
@@ -357,16 +360,19 @@ def main():
 
     if current_platform == "CUDA":
         ext_modules, build_ext = build_on_cuda_platform()
-    else:
+    elif current_platform == "ASCEND":
         ext_modules, build_ext = build_on_ascend_platform()
+    else:
+        ext_modules, build_ext = [], None
 
     setup(
         name="flash_mla",
         version=get_version(),
-        packages=find_packages(include=["flash_mla"]),
+        packages=find_packages(include=["flash_mla", "flash_mla.*"]),
         ext_modules=ext_modules,
-        cmdclass={"build_ext": build_ext},
-        options={"bdist_wheel": {"py_limited_api": "cp310"}},
+        cmdclass={"build_ext": build_ext} if build_ext is not None else {},
+        options={"bdist_wheel": {"py_limited_api": "cp310"}} if ext_modules else {},
+        install_requires=["torch", "triton>=3.7.0"] if current_platform == "ROCM" else [],
     )
 
 

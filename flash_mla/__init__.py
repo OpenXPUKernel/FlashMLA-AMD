@@ -4,13 +4,18 @@ from pathlib import Path
 
 import torch
 
-try:
-    from flash_mla._build_info import BACKEND, EXTENSION
-except ImportError as e:
-    raise ImportError(
-        "flash_mla has not been built yet: flash_mla/_build_info.py is missing. "
-        "Build it in place with `python setup.py build_ext --inplace`, or reinstall flash_mla."
-    ) from e
+if torch.version.hip:
+    # The HIP sparse backend is JIT-compiled by Triton; it must not load a CUDA
+    # extension or require CUDA build metadata merely to import this package.
+    BACKEND = "hip"
+else:
+    try:
+        from flash_mla._build_info import BACKEND, EXTENSION
+    except ImportError as e:
+        raise ImportError(
+            "flash_mla has not been built yet: flash_mla/_build_info.py is missing. "
+            "Build it in place with `python setup.py build_ext --inplace`, or reinstall flash_mla."
+        ) from e
 
 # Loading the extension runs its static STABLE_TORCH_LIBRARY registrations.
 if BACKEND == "npu":
@@ -22,14 +27,15 @@ if BACKEND == "npu":
             "flash_mla was built for Ascend and requires torch_npu. Please install torch_npu"
         ) from e
 
-_extension_path = Path(__file__).parent / EXTENSION
-if not _extension_path.is_file():
-    raise ImportError(
-        f"FlashMLA extension not found: {_extension_path}. "
-        "Reinstall flash_mla, or build it in place with "
-        "`python setup.py build_ext --inplace`."
-    )
-torch.ops.load_library(_extension_path)
+if BACKEND != "hip":
+    _extension_path = Path(__file__).parent / EXTENSION
+    if not _extension_path.is_file():
+        raise ImportError(
+            f"FlashMLA extension not found: {_extension_path}. "
+            "Reinstall flash_mla, or build it in place with "
+            "`python setup.py build_ext --inplace`."
+        )
+    torch.ops.load_library(_extension_path)
 
 from flash_mla.flash_mla_interface import (
     get_mla_metadata,

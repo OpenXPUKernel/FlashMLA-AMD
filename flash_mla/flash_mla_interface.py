@@ -3,7 +3,10 @@ import dataclasses
 
 import torch
 
-_backend = torch.ops.flash_mla
+if torch.version.hip:
+    from flash_mla.amd import ops as _backend
+else:
+    _backend = torch.ops.flash_mla
 
 @dataclasses.dataclass
 class FlashMLASchedMeta:
