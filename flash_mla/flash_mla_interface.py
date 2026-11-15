@@ -1,9 +1,13 @@
-from typing import Optional, Tuple
 import dataclasses
+from typing import Optional, Tuple
 
 import torch
 
-_backend = torch.ops.flash_mla
+if torch.version.hip:
+    from flash_mla.amd import ops as _backend
+else:
+    _backend = torch.ops.flash_mla
+
 
 @dataclasses.dataclass
 class FlashMLASchedMeta:
@@ -32,14 +36,13 @@ class FlashMLASchedMeta:
 
     config: Optional[Config] = None
 
-    tile_scheduler_metadata: Optional[torch.Tensor] = None   # (num_sm_parts, DecodingSchedMetaSize // 4) == (num_sm_parts, 8), dtype torch.int32.
-    num_splits: Optional[torch.Tensor] = None                # (batch_size + 1), dtype torch.int32.
+    tile_scheduler_metadata: Optional[torch.Tensor] = (
+        None  # (num_sm_parts, DecodingSchedMetaSize // 4) == (num_sm_parts, 8), dtype torch.int32.
+    )
+    num_splits: Optional[torch.Tensor] = None  # (batch_size + 1), dtype torch.int32.
 
 
-def get_mla_metadata(
-    *args,
-    **kwargs
-) -> Tuple[FlashMLASchedMeta, None]:
+def get_mla_metadata(*args, **kwargs) -> Tuple[FlashMLASchedMeta, None]:
     """
     Returns an empty instance of FlashMLASchedMeta. The actual scheduling metadata will be generated during the first invocation of flash_mla_with_kvcache.
 
@@ -69,7 +72,7 @@ def flash_mla_with_kvcache(
     extra_indices_in_kvcache: Optional[torch.Tensor] = None,
     topk_length: Optional[torch.Tensor] = None,
     extra_topk_length: Optional[torch.Tensor] = None,
-    enable_batch_invariant: bool = False
+    enable_batch_invariant: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Run sparse attention decode forward.
@@ -123,16 +126,28 @@ def flash_mla_with_kvcache(
     """
     sched_meta = tile_scheduler_metadata
     indices_in_kvcache = indices
-    assert isinstance(sched_meta, FlashMLASchedMeta), "tile_scheduler_metadata must be of type FlashMLASchedMeta"
+    assert isinstance(sched_meta, FlashMLASchedMeta), (
+        "tile_scheduler_metadata must be of type FlashMLASchedMeta"
+    )
     assert num_splits is None, "num_splits must be None"
 
-    assert indices_in_kvcache is not None, "Sparse attention is required: `indices` must be provided"
+    assert indices_in_kvcache is not None, (
+        "Sparse attention is required: `indices` must be provided"
+    )
     assert not causal, "causal must be False when sparse attention is enabled"
-    assert is_fp8_kvcache, "is_fp8_kvcache must be True, since only sparse attention with a quantized KV cache is supported"
+    assert is_fp8_kvcache, (
+        "is_fp8_kvcache must be True, since only sparse attention with a quantized KV cache is supported"
+    )
 
     topk = indices_in_kvcache.shape[-1]
-    extra_k_page_block_size = extra_k_cache.shape[1] if extra_k_cache is not None else None
-    extra_topk = extra_indices_in_kvcache.shape[-1] if extra_indices_in_kvcache is not None else None
+    extra_k_page_block_size = (
+        extra_k_cache.shape[1] if extra_k_cache is not None else None
+    )
+    extra_topk = (
+        extra_indices_in_kvcache.shape[-1]
+        if extra_indices_in_kvcache is not None
+        else None
+    )
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -145,37 +160,71 @@ def flash_mla_with_kvcache(
             h_q=q.shape[2],
             page_block_size=k_cache.shape[1],
             h_k=k_cache.shape[2],
-
             causal=causal,
             is_fp8_kvcache=is_fp8_kvcache,
             topk=topk,
-
             extra_page_block_size=extra_k_page_block_size,
             extra_topk=extra_topk,
-
             enable_batch_invariant=enable_batch_invariant,
         )
     else:
         # Check whether the input arguments are consistent with sched_meta
         helper_msg = " Your input arguments are inconsistent with sched_meta. Please make sure the input arguments are consistent across different invocations of flash_mla_with_kvcache on the same sched_meta."
         assert sched_meta.config is not None
-        assert sched_meta.config.b == q.shape[0], "sched_meta.config.b must be equal to batch_size." + helper_msg
-        assert sched_meta.config.s_q == q.shape[1], "sched_meta.config.s_q must be equal to seq_len_q." + helper_msg
-        assert sched_meta.config.h_q == q.shape[2], "sched_meta.config.h_q must be equal to num_heads_q." + helper_msg
-        assert sched_meta.config.page_block_size == k_cache.shape[1], "sched_meta.config.page_block_size must be equal to page_block_size." + helper_msg
-        assert sched_meta.config.h_k == k_cache.shape[2], "sched_meta.config.h_k must be equal to num_heads_k." + helper_msg
-        assert sched_meta.config.causal == causal, "sched_meta.config.causal must be equal to causal." + helper_msg
-        assert sched_meta.config.is_fp8_kvcache == is_fp8_kvcache, "sched_meta.config.is_fp8_kvcache must be equal to is_fp8_kvcache." + helper_msg
-        assert sched_meta.config.enable_batch_invariant == enable_batch_invariant, "sched_meta.config.enable_batch_invariant must be equal to enable_batch_invariant." + helper_msg
-        assert sched_meta.config.topk == topk, "sched_meta.config.topk must be equal to the last dim of indices_in_kvcache." + helper_msg
-        assert sched_meta.config.extra_page_block_size == extra_k_page_block_size, "sched_meta.config.extra_page_block_size must be equal to the page_block_size of extra_k_cache." + helper_msg
-        assert sched_meta.config.extra_topk == extra_topk, "sched_meta.config.extra_topk must be equal to the last dim of extra_indices_in_kvcache." + helper_msg
+        assert sched_meta.config.b == q.shape[0], (
+            "sched_meta.config.b must be equal to batch_size." + helper_msg
+        )
+        assert sched_meta.config.s_q == q.shape[1], (
+            "sched_meta.config.s_q must be equal to seq_len_q." + helper_msg
+        )
+        assert sched_meta.config.h_q == q.shape[2], (
+            "sched_meta.config.h_q must be equal to num_heads_q." + helper_msg
+        )
+        assert sched_meta.config.page_block_size == k_cache.shape[1], (
+            "sched_meta.config.page_block_size must be equal to page_block_size."
+            + helper_msg
+        )
+        assert sched_meta.config.h_k == k_cache.shape[2], (
+            "sched_meta.config.h_k must be equal to num_heads_k." + helper_msg
+        )
+        assert sched_meta.config.causal == causal, (
+            "sched_meta.config.causal must be equal to causal." + helper_msg
+        )
+        assert sched_meta.config.is_fp8_kvcache == is_fp8_kvcache, (
+            "sched_meta.config.is_fp8_kvcache must be equal to is_fp8_kvcache."
+            + helper_msg
+        )
+        assert sched_meta.config.enable_batch_invariant == enable_batch_invariant, (
+            "sched_meta.config.enable_batch_invariant must be equal to enable_batch_invariant."
+            + helper_msg
+        )
+        assert sched_meta.config.topk == topk, (
+            "sched_meta.config.topk must be equal to the last dim of indices_in_kvcache."
+            + helper_msg
+        )
+        assert sched_meta.config.extra_page_block_size == extra_k_page_block_size, (
+            "sched_meta.config.extra_page_block_size must be equal to the page_block_size of extra_k_cache."
+            + helper_msg
+        )
+        assert sched_meta.config.extra_topk == extra_topk, (
+            "sched_meta.config.extra_topk must be equal to the last dim of extra_indices_in_kvcache."
+            + helper_msg
+        )
 
     out, lse, new_tile_scheduler_metadata, new_num_splits = _backend.sparse_decode_fwd(
-        q, k_cache, indices_in_kvcache, topk_length, attn_sink,
-        sched_meta.tile_scheduler_metadata, sched_meta.num_splits,
-        extra_k_cache, extra_indices_in_kvcache, extra_topk_length,
-        head_dim_v, softmax_scale, enable_batch_invariant
+        q,
+        k_cache,
+        indices_in_kvcache,
+        topk_length,
+        attn_sink,
+        sched_meta.tile_scheduler_metadata,
+        sched_meta.num_splits,
+        extra_k_cache,
+        extra_indices_in_kvcache,
+        extra_topk_length,
+        head_dim_v,
+        softmax_scale,
+        enable_batch_invariant,
     )
     sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata
     sched_meta.num_splits = new_num_splits
@@ -257,10 +306,14 @@ def _flash_attn_varlen_forward(
         softmax_scale = head_dim_qk ** (-0.5)
 
     if out is None:
-        out = torch.empty(qo_total_len, num_qo_heads, head_dim_vo, device=q.device, dtype=q.dtype)
+        out = torch.empty(
+            qo_total_len, num_qo_heads, head_dim_vo, device=q.device, dtype=q.dtype
+        )
     if lse is None:
         # Make lse contiguous on seqlen dim
-        lse = torch.empty(num_qo_heads, qo_total_len, device=q.device, dtype=torch.float32).T
+        lse = torch.empty(
+            num_qo_heads, qo_total_len, device=q.device, dtype=torch.float32
+        ).T
 
     workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device=q.device)
     _backend.dense_prefill_fwd(
@@ -308,18 +361,26 @@ def _flash_attn_varlen_backward(
 
     # TODO: fix bwd GQA
     if num_qo_heads != num_kv_heads:
-        raise ValueError(f"SM100 bwd doesn't support GQA now. num_qo_heads: {num_qo_heads}, num_kv_heads: {num_kv_heads}.")
+        raise ValueError(
+            f"SM100 bwd doesn't support GQA now. num_qo_heads: {num_qo_heads}, num_kv_heads: {num_kv_heads}."
+        )
 
     mask_mode_code = 1 if causal else 0
     if softmax_scale is None:
         softmax_scale = head_dim_qk ** (-0.5)
 
     if dq is None:
-        dq = torch.empty(qo_total_len, num_qo_heads, head_dim_qk, device=q.device, dtype=q.dtype)
+        dq = torch.empty(
+            qo_total_len, num_qo_heads, head_dim_qk, device=q.device, dtype=q.dtype
+        )
     if dk is None:
-        dk = torch.empty(kv_total_len, num_kv_heads, head_dim_qk, device=q.device, dtype=q.dtype)
+        dk = torch.empty(
+            kv_total_len, num_kv_heads, head_dim_qk, device=q.device, dtype=q.dtype
+        )
     if dv is None:
-        dv = torch.empty(kv_total_len, num_kv_heads, head_dim_vo, device=q.device, dtype=q.dtype)
+        dv = torch.empty(
+            kv_total_len, num_kv_heads, head_dim_vo, device=q.device, dtype=q.dtype
+        )
 
     # The C++ side takes the q length from the problem shape: `max_seqlen_qo` for variable-length
     # batches, but `total_seqlen_q / batch_size` for fixed-length ones
@@ -329,8 +390,12 @@ def _flash_attn_varlen_backward(
     seqlen_qo_for_workspace = max_seqlen_qo if is_varlen else qo_total_len // bs
     max_seqlen_qo_aligned = (seqlen_qo_for_workspace + 7) // 8 * 8
     workspace_bytes = 0
-    workspace_bytes += 4 * bs * max_seqlen_qo_aligned * num_qo_heads * head_dim_qk  # dQ_acc
-    workspace_bytes += 4 * max_seqlen_qo_aligned * bs * num_qo_heads * 2  # sum_OdO and scaled_lse
+    workspace_bytes += (
+        4 * bs * max_seqlen_qo_aligned * num_qo_heads * head_dim_qk
+    )  # dQ_acc
+    workspace_bytes += (
+        4 * max_seqlen_qo_aligned * bs * num_qo_heads * 2
+    )  # sum_OdO and scaled_lse
     workspace_buffer = torch.empty(workspace_bytes, dtype=torch.uint8, device=q.device)
     _backend.dense_prefill_bwd(
         workspace_buffer,
@@ -370,9 +435,15 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         is_varlen: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         out, lse = _flash_attn_varlen_forward(
-            q, k, v,
-            cu_seqlens_qo, cu_seqlens_kv, max_seqlen_qo, max_seqlen_kv,
-            causal=causal, softmax_scale=softmax_scale,
+            q,
+            k,
+            v,
+            cu_seqlens_qo,
+            cu_seqlens_kv,
+            max_seqlen_qo,
+            max_seqlen_kv,
+            causal=causal,
+            softmax_scale=softmax_scale,
             is_varlen=is_varlen,
         )
         ctx.save_for_backward(q, k, v, out, lse, cu_seqlens_qo, cu_seqlens_kv)
@@ -391,9 +462,18 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         del dlse  # LSE doesn't support backward currently
         q, k, v, out, lse, cu_seqlens_qo, cu_seqlens_kv = ctx.saved_tensors
         dq, dk, dv = _flash_attn_varlen_backward(
-            do, q, k, v, out, lse,
-            cu_seqlens_qo, cu_seqlens_kv, ctx.max_seqlen_qo, ctx.max_seqlen_kv,
-            causal=ctx.causal, softmax_scale=ctx.softmax_scale,
+            do,
+            q,
+            k,
+            v,
+            out,
+            lse,
+            cu_seqlens_qo,
+            cu_seqlens_kv,
+            ctx.max_seqlen_qo,
+            ctx.max_seqlen_kv,
+            causal=ctx.causal,
+            softmax_scale=ctx.softmax_scale,
             is_varlen=ctx.is_varlen,
         )
         return dq, dk, dv, None, None, None, None, None, None, None
@@ -447,11 +527,20 @@ def flash_attn_varlen_func(
         same dtypes and head dims as the forward pass.
     """
     assert dropout_p == 0.0, "dropout is not supported, `dropout_p` must be 0.0"
-    assert not deterministic, "the `deterministic` flag is not supported: the deterministic backward mode is not implemented and dq is not guaranteed to be bitwise reproducible"
+    assert not deterministic, (
+        "the `deterministic` flag is not supported: the deterministic backward mode is not implemented and dq is not guaranteed to be bitwise reproducible"
+    )
     return FlashAttnVarlenFunc.apply(
-        q, k, v,
-        cu_seqlens_qo, cu_seqlens_kv, max_seqlen_qo, max_seqlen_kv,
-        causal, softmax_scale, is_varlen,
+        q,
+        k,
+        v,
+        cu_seqlens_qo,
+        cu_seqlens_kv,
+        max_seqlen_qo,
+        max_seqlen_kv,
+        causal,
+        softmax_scale,
+        is_varlen,
     )
 
 
@@ -494,11 +583,20 @@ def flash_attn_varlen_qkvpacked_func(
         - lse: [total_tokens, num_heads], float32, natural log, contiguous on the seqlen dim
     """
     assert dropout_p == 0.0, "dropout is not supported, `dropout_p` must be 0.0"
-    assert not deterministic, "the `deterministic` flag is not supported: the deterministic backward mode is not implemented and dq is not guaranteed to be bitwise reproducible"
+    assert not deterministic, (
+        "the `deterministic` flag is not supported: the deterministic backward mode is not implemented and dq is not guaranteed to be bitwise reproducible"
+    )
     return FlashAttnVarlenFunc.apply(
-        qkv[:, :, :head_dim_qk], qkv[:, :, head_dim_qk:head_dim_qk * 2], qkv[:, :, head_dim_qk * 2:],
-        cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
-        causal, softmax_scale, is_varlen,
+        qkv[:, :, :head_dim_qk],
+        qkv[:, :, head_dim_qk : head_dim_qk * 2],
+        qkv[:, :, head_dim_qk * 2 :],
+        cu_seqlens,
+        cu_seqlens,
+        max_seqlen,
+        max_seqlen,
+        causal,
+        softmax_scale,
+        is_varlen,
     )
 
 
@@ -544,9 +642,18 @@ def flash_attn_varlen_kvpacked_func(
         - lse: [total_qo_tokens, num_qo_heads], float32, natural log, contiguous on the seqlen dim
     """
     assert dropout_p == 0.0, "dropout is not supported, `dropout_p` must be 0.0"
-    assert not deterministic, "the `deterministic` flag is not supported: the deterministic backward mode is not implemented and dq is not guaranteed to be bitwise reproducible"
+    assert not deterministic, (
+        "the `deterministic` flag is not supported: the deterministic backward mode is not implemented and dq is not guaranteed to be bitwise reproducible"
+    )
     return FlashAttnVarlenFunc.apply(
-        q, kv[:, :, :head_dim_qk], kv[:, :, head_dim_qk:],
-        cu_seqlens_qo, cu_seqlens_kv, max_seqlen_qo, max_seqlen_kv,
-        causal, softmax_scale, is_varlen,
+        q,
+        kv[:, :, :head_dim_qk],
+        kv[:, :, head_dim_qk:],
+        cu_seqlens_qo,
+        cu_seqlens_kv,
+        max_seqlen_qo,
+        max_seqlen_kv,
+        causal,
+        softmax_scale,
+        is_varlen,
     )
