@@ -465,10 +465,10 @@ __global__ __launch_bounds__((L<H, BK>::T)) void kernel(Args p, uint8_t *packet_
     const int qw = wave % QKW;
     int row = blockIdx.x;
 #ifdef FLASH_MLA_AMD_REQUEST_ROW_GROUP
-    if (p.rows == 500)
-        row = request_row<FLASH_MLA_AMD_REQUEST_ROW_GROUP, 5>(row, 500);
-    else if (p.rows == 400)
-        row = request_row<FLASH_MLA_AMD_REQUEST_ROW_GROUP, 4>(row, 400);
+    if (p.topk == 128 && p.rows % 5 == 0)
+        row = request_row<FLASH_MLA_AMD_REQUEST_ROW_GROUP, 5>(row, p.rows);
+    else if (p.topk == 132 && p.rows % 4 == 0)
+        row = request_row<FLASH_MLA_AMD_REQUEST_ROW_GROUP, 4>(row, p.rows);
 #endif
     const int hb = blockIdx.y * H, qh = qw / (BK / 16) * 16 + r, kh = qw % (BK / 16) * 16 + r;
     const int ml = p.lengths ? min(max(p.lengths[row], 0), p.topk) : p.topk;
@@ -1357,13 +1357,13 @@ template <int BK> int launch_all(const Args *p, int h, void *stream) {
         if (h == 64 && !p->neox && p->page_size == 133 && p->cache_token_stride == 528 && p->cache_block_stride == 3094080 &&
             uint64_t(p->cache_blocks) * 5860 <= UINT32_MAX) {
 #define PAGE_RUN(F) (p->positions64 ? launch<64, 64, false, true, false, F>(*p, s) : launch<64, 64, false, false, false, F>(*p, s))
-            if (p->rows == 500 && p->topk == 128) {
+            if (p->rows % 5 == 0 && p->topk == 128) {
                 if (!p->extra_topk)
                     return PAGE_RUN(1);
                 if (p->extra_topk == 512 && p->extra_format == 4 && p->extra_page_size == 64 && p->extra_token_stride == 288 &&
                     p->extra_block_stride == 114048 && uint64_t(p->extra_blocks) * 396 <= UINT32_MAX)
                     return PAGE_RUN(2);
-            } else if (p->rows == 400 && p->topk == 132 && !p->extra_topk)
+            } else if (p->rows % 4 == 0 && p->topk == 132 && !p->extra_topk)
                 return PAGE_RUN(3);
 #undef PAGE_RUN
         }
