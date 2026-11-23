@@ -41,3 +41,9 @@ python -m pytest tests/amd/test_sparse_mla.py -q
 The large byte-offset regression needs 6 GiB free GPU memory. Model-level
 precision, long-context quality, DSpark and service stability require separate
 validation; kernel tests do not establish those properties.
+
+### Shared compressed KV for sparse decode
+
+The optional native entry point in `csrc/hip_kernels/fused_sparse_attention_reuse_extra.hip` packs the selected compressed keys in each query's original order. Call `fused_attention_packet_bytes` to size each 64-key packet and `fused_attention_pack_extra` to populate it. Use `fused_attention_reuse64_prepare` before graph capture and `fused_attention_reuse64_launch` on the caller's stream. Recreate packets when the selected keys or underlying KV change.
+
+Compile this translation unit with `-O3 -std=c++20 -ffp-contract=off` and `-DFLASH_MLA_AMD_TWO_SOFTMAX`. The optional definitions `FLASH_MLA_AMD_ROW_ROTATE` and `FLASH_MLA_AMD_ROW_XOR4` select alternate lane permutations for the same ordered reductions.
