@@ -422,6 +422,15 @@ template <bool NEOX> __device__ __forceinline__ void rotate_tail(I4 &lo, I4 &hi,
     }
 }
 
+// Transpose only the workgroup-to-row mapping. Query storage, key order,
+// reduction order and output addresses continue to use each original row.
+template <int Width, int Positions> __device__ __forceinline__ int request_row(int physical, int rows) {
+    const int group = physical / (Width * Positions);
+    const int inside = physical % (Width * Positions);
+    const int requests = min(Width, rows / Positions - group * Width);
+    return (group * Width + inside % requests) * Positions + inside / requests;
+}
+
 template <int H, int BK, bool NEOX, bool POS64, bool CONTIG = false, int FIXED = 0>
 __global__ __launch_bounds__((L<H, BK>::T)) void kernel(Args p, uint8_t *packet_out) {
     if constexpr (FIXED >= 1 && FIXED <= 3) {
@@ -454,7 +463,14 @@ __global__ __launch_bounds__((L<H, BK>::T)) void kernel(Args p, uint8_t *packet_
     const int tid = threadIdx.x, lane = tid % 64, r = lane % 16, g = lane / 16, wave = __builtin_amdgcn_readfirstlane(tid / 64);
     constexpr int QKW = H / 16 * (BK / 16);
     const int qw = wave % QKW;
-    const int row = blockIdx.x, hb = blockIdx.y * H, qh = qw / (BK / 16) * 16 + r, kh = qw % (BK / 16) * 16 + r;
+    int row = blockIdx.x;
+#ifdef FLASH_MLA_AMD_REQUEST_ROW_GROUP
+    if (p.rows == 500)
+        row = request_row<FLASH_MLA_AMD_REQUEST_ROW_GROUP, 5>(row, 500);
+    else if (p.rows == 400)
+        row = request_row<FLASH_MLA_AMD_REQUEST_ROW_GROUP, 4>(row, 400);
+#endif
+    const int hb = blockIdx.y * H, qh = qw / (BK / 16) * 16 + r, kh = qw % (BK / 16) * 16 + r;
     const int ml = p.lengths ? min(max(p.lengths[row], 0), p.topk) : p.topk;
     const int el = p.extra_lengths ? min(max(p.extra_lengths[row], 0), p.extra_topk) : p.extra_topk;
     const int mt = (ml + BK - 1) / BK, et = (el + BK - 1) / BK;
